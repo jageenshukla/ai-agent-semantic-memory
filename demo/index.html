@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Customer Support Agent - Demo</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 AI Customer Support Agent</h1>
+            <p class="subtitle">with Semantic Long-Term Memory</p>
+        </header>
+
+        <div class="controls">
+            <div class="user-selector">
+                <label for="userId">Customer ID:</label>
+                <select id="userId" onchange="handleCustomerChange()">
+                    <option value="customer_123">customer_123 (Alice)</option>
+                    <option value="customer_456">customer_456 (Bob)</option>
+                    <option value="customer_789">customer_789 (Charlie)</option>
+                </select>
+            </div>
+
+            <div class="stats">
+                <span class="stat" id="memoryCount">Memories: 0</span>
+                <span class="stat" id="sessionTime">Session: 0m</span>
+                <button class="btn-clear" onclick="clearAllData()">🗑️ Fresh Start</button>
+            </div>
+        </div>
+
+        <div class="chat-container">
+            <div class="messages" id="messages"></div>
+
+            <div class="input-container">
+                <input
+                    type="text"
+                    id="messageInput"
+                    placeholder="Type your message..."
+                    onkeypress="handleKeyPress(event)"
+                >
+                <button onclick="sendMessage()" id="sendBtn">Send</button>
+            </div>
+        </div>
+
+        <div class="info-panel">
+            <h3>📊 Agent Stats</h3>
+            <div id="agentStats"></div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
