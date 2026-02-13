@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+
+# Data
+chroma_data/
+data/
+
+# Logs
+logs/
+*.log
+
+# Databases
+*.sqlite
+*.db
+
+# Documentation (not needed in repo)
+docs/
+
+# OS files
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+.claude/
