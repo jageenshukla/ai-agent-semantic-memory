@@ -13,39 +13,83 @@ A production-ready AI customer support agent with semantic long-term memory usin
 
 ## Prerequisites
 
-- **Node.js** 20+
-- **Ollama** installed and running ([https://ollama.com](https://ollama.com))
+### Required Software
+
+1. **Node.js** 20+ ([Download](https://nodejs.org/))
+2. **Docker Desktop** (for ChromaDB) ([Download](https://www.docker.com/products/docker-desktop/))
+3. **Ollama** (local LLM) ([Download](https://ollama.com))
+
+### Architecture Dependencies
+
+This project uses:
+- **Node.js** - Runtime for TypeScript application
+- **ChromaDB** - Vector database (runs in Docker container)
+- **Ollama** - Local LLM for chat and embeddings
+
+**Important:** ChromaDB runs as a Docker container, not as a local Python installation. Your Node.js app connects to the Docker container via the `chromadb` npm client library.
 
 ## Quick Start
 
-### 1. Install Dependencies
+### 1. Start ChromaDB (Docker)
+
+**First time setup:**
+```bash
+docker run -d -p 8000:8000 --name chroma chromadb/chroma:latest
+```
+
+**For subsequent runs:**
+```bash
+docker start chroma
+```
+
+**Verify it's running:**
+```bash
+docker ps | grep chroma
+# Should show: chroma ... Up ... 0.0.0.0:8000->8000/tcp
+```
+
+### 2. Install Dependencies
 
 ```bash
 npm install
 ```
 
-### 2. Pull Ollama Models
+### 3. Pull Ollama Models
 
 ```bash
 ollama pull llama3.2
 ollama pull nomic-embed-text
 ```
 
-### 3. Configure Environment
+**Verify Ollama is running:**
+```bash
+ollama list
+# Should show: llama3.2 and nomic-embed-text
+```
+
+### 4. Configure Environment
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` if needed (defaults work for local Ollama setup).
+Edit `.env` if needed (defaults work for local setup).
 
-### 4. Start the Server
+### 5. Start the Server
 
 ```bash
 npm run dev
 ```
 
 Server starts at: **http://localhost:3000**
+
+### Startup Checklist
+
+Before starting the server, ensure:
+- ✅ Docker Desktop is running
+- ✅ ChromaDB container is running (`docker ps | grep chroma`)
+- ✅ Ollama is running (`ollama list` works)
+- ✅ `.env` file exists
 
 ## Usage
 
@@ -101,36 +145,79 @@ DELETE /api/sessions/:sessionId    # Clear session
 
 ## Architecture
 
+### System Overview
+
 ```
-┌─────────────────┐
-│   Web UI        │
-│  (HTML/CSS/JS)  │
-└────────┬────────┘
-         │ HTTP/REST
-         ▼
-┌─────────────────┐
-│  Express API    │
-│  (TypeScript)   │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Support Agent  │
-│   (Genkit)      │
-└────┬───────┬────┘
-     │       │
-     ▼       ▼
-┌─────────┐ ┌──────────┐
-│ Memory  │ │  Ollama  │
-│ Manager │ │  Client  │
-└────┬────┘ └──────────┘
-     │
-     ▼
-┌─────────────────┐
-│   ChromaDB      │
-│ (Vector Store)  │
-└─────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                       YOUR MACHINE                          │
+│                                                             │
+│  ┌─────────────────┐                                       │
+│  │   Web UI        │  ← Browser (localhost:3000)           │
+│  │  (HTML/CSS/JS)  │                                       │
+│  └────────┬────────┘                                       │
+│           │ HTTP/REST                                      │
+│           ▼                                                │
+│  ┌─────────────────┐                                       │
+│  │  Express API    │  ← Node.js server (port 3000)        │
+│  │  (TypeScript)   │                                       │
+│  └────────┬────────┘                                       │
+│           │                                                │
+│           ▼                                                │
+│  ┌─────────────────┐                                       │
+│  │  Support Agent  │  ← Genkit orchestration              │
+│  │   (Genkit)      │                                       │
+│  └────┬───────┬────┘                                       │
+│       │       │                                            │
+│       │       └──────────┐                                 │
+│       ▼                  ▼                                 │
+│  ┌─────────┐      ┌──────────────┐                        │
+│  │ Memory  │      │  Ollama      │  ← Local LLM           │
+│  │ Manager │      │  (llama3.2)  │     (port 11434)       │
+│  └────┬────┘      └──────────────┘                        │
+│       │                                                    │
+│       │ chromadb npm client                                │
+│       ▼                                                    │
+│  ┌──────────────────────────────┐                         │
+│  │  🐳 Docker Container         │                         │
+│  │  ┌────────────────────────┐  │                         │
+│  │  │   ChromaDB Server      │  │  ← Vector database      │
+│  │  │   (port 8000)          │  │     (persistent)        │
+│  │  │                        │  │                         │
+│  │  │   Data: /data/db      │  │                         │
+│  │  └────────────────────────┘  │                         │
+│  │  Volume: chroma_data          │                         │
+│  └──────────────────────────────┘                         │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+### Component Details
+
+| Component | Type | Port | Purpose |
+|-----------|------|------|---------|
+| **Web UI** | Static HTML/CSS/JS | 3000 | User interface |
+| **Express API** | Node.js/TypeScript | 3000 | REST endpoints |
+| **Genkit Agent** | TypeScript library | - | Agent orchestration |
+| **Memory Manager** | TypeScript class | - | Memory operations |
+| **Ollama** | Local service | 11434 | LLM inference |
+| **ChromaDB** | Docker container | 8000 | Vector storage |
+
+### Data Flow
+
+1. **User sends message** → Web UI → Express API
+2. **API calls agent** → Genkit Agent
+3. **Agent retrieves memories** → Memory Manager → ChromaDB (via npm client → Docker)
+4. **Agent generates response** → Ollama LLM
+5. **Agent stores interaction** → Memory Manager → ChromaDB
+6. **Response sent back** → Express API → Web UI
+
+### Why Docker for ChromaDB?
+
+✅ **Isolation** - Runs in its own container
+✅ **Persistence** - Data survives in Docker volume
+✅ **Easy management** - Start/stop with Docker commands
+✅ **Clean environment** - No Python conflicts
+✅ **Port mapping** - Accessible on localhost:8000
 
 ## How It Works
 
@@ -270,28 +357,90 @@ Ensure these are set in production:
 
 ## Troubleshooting
 
+### ChromaDB Connection Issues
+
+**Problem:** `Connection refused` or `ECONNREFUSED localhost:8000`
+
+**Solution:**
+```bash
+# Check if Docker is running
+docker ps
+
+# Check if ChromaDB container exists
+docker ps -a | grep chroma
+
+# Start the container if it's stopped
+docker start chroma
+
+# If container doesn't exist, create it
+docker run -d -p 8000:8000 --name chroma chromadb/chroma:latest
+
+# Check logs for errors
+docker logs chroma --tail 50
+```
+
 ### Ollama not connecting
 
+**Problem:** `Failed to connect to Ollama`
+
+**Solution:**
 ```bash
 # Check if Ollama is running
 ollama list
 
-# Start Ollama service
-ollama serve
+# Pull required models if missing
+ollama pull llama3.2
+ollama pull nomic-embed-text
+
+# Check Ollama server status
+curl http://localhost:11434/api/tags
 ```
 
-### ChromaDB errors
+### Port Already in Use
 
+**Problem:** `Port 3000 is already in use` or `Port 8000 is already in use`
+
+**Solution:**
 ```bash
-# Clear ChromaDB data
-rm -rf chroma_data/
+# Find process using port 3000 (Express)
+lsof -ti:3000 | xargs kill -9
+
+# Find process using port 8000 (ChromaDB)
+lsof -ti:8000 | xargs kill -9
+
+# Or change ports in .env file
+PORT=3001
 ```
 
 ### Memory not persisting
 
-- Verify ChromaDB is initialized (check console logs)
-- Ensure embeddings are 768-dimensional
+**Problem:** Memories disappear after restart
+
+**Solution:**
+- Verify ChromaDB container is running (`docker ps | grep chroma`)
+- Check ChromaDB logs: `docker logs chroma`
+- Ensure Docker volume exists: `docker volume ls | grep chroma`
+- Verify embeddings are 768-dimensional (check console logs)
 - Check userId consistency across requests
+
+### Clear All Data (Fresh Start)
+
+**Warning:** This deletes all memories permanently!
+
+```bash
+# Stop and remove ChromaDB container
+docker stop chroma
+docker rm chroma
+
+# Remove ChromaDB data volume
+docker volume rm repliq-backend_chroma_data
+
+# Recreate container
+docker run -d -p 8000:8000 --name chroma chromadb/chroma:latest
+
+# Restart your server
+npm run dev
+```
 
 ## License
 
