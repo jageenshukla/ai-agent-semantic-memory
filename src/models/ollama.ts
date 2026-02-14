@@ -1,3 +1,5 @@
+// MUST import env FIRST to load environment variables
+import '../config/env.js';
 import { Ollama } from 'ollama';
 import crypto from 'crypto';
 import type { ChatMessage, OllamaConfig, ModelInfo } from '../types/index.js';

@@ -190,12 +190,11 @@ export class MemoryManager {
     this.ensureInitialized();
 
     try {
-      // Use a generic query to get all memories
-      const results = await vectorStore.searchMemories('', userId, limit * 2);
+      // Get all memories for user directly from vector store (no embedding needed)
+      const memories = await vectorStore.getUserMemories(userId);
 
       // Sort by timestamp (most recent first)
-      const sorted = results
-        .map(r => r.memory)
+      const sorted = memories
         .sort((a, b) => b.timestamp - a.timestamp)
         .slice(0, limit);
 
@@ -302,15 +301,196 @@ export class MemoryManager {
   }
 
   /**
-   * Extract and store key facts from an interaction
+   * Extract key facts from conversation using LLM
+   * This uses the LLM to intelligently extract important information
+   * Falls back to keyword-based extraction if LLM fails
    * @param interaction - Interaction to extract facts from
+   * @returns Array of extracted facts
    */
-  private async extractAndStoreKeyFacts(interaction: Interaction): Promise<void> {
-    // Simple keyword-based extraction for now
-    // TODO: Use LLM for more sophisticated extraction
+  private async extractKeyFacts(interaction: Interaction): Promise<Array<{
+    content: string;
+    importance: number;
+    type: MemoryType;
+    category: MemoryCategory;
+    confidence?: number;
+  }>> {
+    const prompt = `Extract factual information explicitly stated by the user.
 
+USER'S MESSAGE: "${interaction.userMessage}"
+
+WHAT TO EXTRACT:
+- Names: "my name is X", "I am X", "call me X" → Extract as "User's name is X"
+- Company/Job: "I work at X", "I'm a Y at Z" → Extract as "User works at X as Y"
+- Contact: "my email is X", "call me at Y", "my phone is Z" → Extract as "User's email/phone is X"
+- Location: "I'm from X", "I live in Y" → Extract as "User is from/lives in X"
+- Problems: "X is broken", "error with X", "not working" → Extract as "User reported issue: X"
+- Requests: "I need X", "can you add X", "want Y" → Extract as "User requested: X"
+- Preferences: "I prefer X", "I like X", "I want Y" → Extract as "User prefers X"
+- Sentiment: "I love X", "I hate Y", "frustrated with Z" → Extract as "User expressed [emotion] about X"
+
+RULES:
+- Extract ONLY from the user's message above (not from these instructions)
+- Use simple, factual language
+- Extract ALL facts, even if multiple in one message
+- If no facts are stated, return []
+- Include confidence score (0.0-1.0) based on clarity
+
+Return ONLY valid JSON array (no markdown):
+[
+  {
+    "content": "User's name is Alice",
+    "importance": 0.95,
+    "confidence": 0.98,
+    "type": "preference",
+    "category": "general"
+  }
+]
+
+Importance scores:
+- Personal identifiers (name, email, phone, location): 0.9-1.0
+- Critical bugs/errors: 0.8-0.9
+- Feature requests: 0.7-0.8
+- General preferences: 0.6-0.7
+- Sentiment/feedback: 0.5-0.7
+- Chitchat/questions: 0.1-0.3
+
+Valid types ONLY: "preference", "event", "sentiment", "extracted_fact"
+Valid categories ONLY: "general", "bug_report", "feature_request", "question", "feedback", "technical"`;
+
+    try {
+      const response = await ollamaClient.chat([
+        {
+          role: 'system',
+          content: 'You are a fact extraction specialist. Extract ALL explicit facts from user messages including names, contact info, preferences, issues, requests, and sentiment. Return ONLY valid JSON array with proper types and confidence scores.'
+        },
+        { role: 'user', content: prompt }
+      ]);
+
+      // Parse LLM response - try to extract JSON even if wrapped in markdown
+      let jsonText = response.trim();
+
+      // Remove markdown code blocks if present
+      if (jsonText.startsWith('```json')) {
+        jsonText = jsonText.replace(/```json\n?/g, '').replace(/```\n?$/g, '');
+      } else if (jsonText.startsWith('```')) {
+        jsonText = jsonText.replace(/```\n?/g, '').replace(/```\n?$/g, '');
+      }
+
+      const rawFacts = JSON.parse(jsonText);
+
+      // Validate array
+      if (!Array.isArray(rawFacts)) {
+        throw new Error('LLM response is not an array');
+      }
+
+      // Validate and sanitize each fact
+      const validatedFacts = rawFacts
+        .map((fact: any) => this.validateExtractedFact(fact))
+        .filter(fact => fact !== null) as Array<{
+          content: string;
+          importance: number;
+          type: MemoryType;
+          category: MemoryCategory;
+          confidence: number;
+        }>;
+
+      console.log(`[MemoryManager] LLM extracted ${validatedFacts.length}/${rawFacts.length} valid facts`);
+
+      return validatedFacts;
+    } catch (error) {
+      console.error('[MemoryManager] LLM extraction failed:', error);
+      console.log('[MemoryManager] Falling back to keyword-based extraction');
+
+      // Fallback to keyword-based extraction
+      return this.extractKeyFactsKeywordBased(interaction);
+    }
+  }
+
+  /**
+   * Validate and sanitize an extracted fact from LLM
+   * @param fact - Raw fact from LLM
+   * @returns Validated fact or null if invalid
+   */
+  private validateExtractedFact(fact: any): {
+    content: string;
+    importance: number;
+    type: MemoryType;
+    category: MemoryCategory;
+    confidence: number;
+  } | null {
+    // Valid enum values
+    const validTypes = ['conversation', 'extracted_fact', 'preference', 'sentiment', 'event'];
+    const validCategories = ['bug_report', 'feature_request', 'question', 'feedback', 'technical', 'general'];
+
+    // Validate required fields
+    if (!fact || typeof fact !== 'object') {
+      console.warn('[MemoryManager] Invalid fact: not an object');
+      return null;
+    }
+
+    if (!fact.content || typeof fact.content !== 'string' || fact.content.trim().length === 0) {
+      console.warn('[MemoryManager] Invalid fact: missing or empty content');
+      return null;
+    }
+
+    if (fact.content.length > 500) {
+      console.warn('[MemoryManager] Invalid fact: content too long (>500 chars)');
+      return null;
+    }
+
+    // Validate and sanitize type
+    let type = fact.type?.toLowerCase();
+    if (!validTypes.includes(type)) {
+      console.warn(`[MemoryManager] Invalid type "${fact.type}", defaulting to "extracted_fact"`);
+      type = 'extracted_fact';
+    }
+
+    // Validate and sanitize category
+    let category = fact.category?.toLowerCase();
+    if (!validCategories.includes(category)) {
+      console.warn(`[MemoryManager] Invalid category "${fact.category}", defaulting to "general"`);
+      category = 'general';
+    }
+
+    // Validate and clamp importance (0-1)
+    const importance = Math.min(Math.max(parseFloat(fact.importance) || 0.5, 0), 1);
+
+    // Validate and clamp confidence (0-1)
+    const confidence = Math.min(Math.max(parseFloat(fact.confidence) || 0.7, 0), 1);
+
+    // Filter out low-confidence extractions
+    if (confidence < 0.5) {
+      console.warn(`[MemoryManager] Rejecting low-confidence fact (${confidence}): ${fact.content.substring(0, 50)}`);
+      return null;
+    }
+
+    return {
+      content: fact.content.trim(),
+      importance,
+      type: type as MemoryType,
+      category: category as MemoryCategory,
+      confidence
+    };
+  }
+
+  /**
+   * Fallback keyword-based extraction (used if LLM fails)
+   * @param interaction - Interaction to extract facts from
+   * @returns Array of extracted facts
+   */
+  private extractKeyFactsKeywordBased(interaction: Interaction): Array<{
+    content: string;
+    importance: number;
+    type: MemoryType;
+    category: MemoryCategory;
+  }> {
     const userMessage = interaction.userMessage.toLowerCase();
-    const facts: MemoryInput[] = [];
+    const facts: Array<{
+      content: string;
+      importance: number;
+      type: MemoryType;
+      category: MemoryCategory;
+    }> = [];
 
     // Extract explicit "remember" commands (HIGHEST PRIORITY)
     if (userMessage.includes('remember') || userMessage.includes('my name is') ||
@@ -337,11 +517,9 @@ export class MemoryManager {
       }
 
       facts.push({
-        userId: interaction.userId,
         content: rememberWhat,
         type: 'preference' as MemoryType,
         category: 'general' as MemoryCategory,
-        sessionId: interaction.sessionId,
         importance: 0.95  // VERY HIGH - explicit memory request
       });
     }
@@ -350,11 +528,9 @@ export class MemoryManager {
     if (userMessage.includes('broken') || userMessage.includes('not working') ||
         userMessage.includes('error') || userMessage.includes('bug')) {
       facts.push({
-        userId: interaction.userId,
         content: `Customer reported: ${interaction.userMessage}`,
         type: 'event' as MemoryType,
         category: 'bug_report' as MemoryCategory,
-        sessionId: interaction.sessionId,
         importance: 0.8
       });
     }
@@ -363,11 +539,9 @@ export class MemoryManager {
     if (userMessage.includes('want') || userMessage.includes('need') ||
         userMessage.includes('would like') || userMessage.includes('feature')) {
       facts.push({
-        userId: interaction.userId,
         content: `Customer requested: ${interaction.userMessage}`,
         type: 'event' as MemoryType,
         category: 'feature_request' as MemoryCategory,
-        sessionId: interaction.sessionId,
         importance: 0.7
       });
     }
@@ -376,11 +550,9 @@ export class MemoryManager {
     if (userMessage.includes('prefer') || userMessage.includes('like to') ||
         userMessage.includes('developer') || userMessage.includes('technical')) {
       facts.push({
-        userId: interaction.userId,
         content: `Customer preference: ${interaction.userMessage}`,
         type: 'preference' as MemoryType,
         category: 'general' as MemoryCategory,
-        sessionId: interaction.sessionId,
         importance: 0.6
       });
     }
@@ -389,19 +561,174 @@ export class MemoryManager {
     if (userMessage.includes('company') || userMessage.includes('organization') ||
         userMessage.includes('work for') || userMessage.includes('work at')) {
       facts.push({
-        userId: interaction.userId,
         content: `Customer info: ${interaction.userMessage}`,
         type: 'preference' as MemoryType,
         category: 'general' as MemoryCategory,
-        sessionId: interaction.sessionId,
         importance: 0.7
       });
     }
 
-    // Store extracted facts
+    return facts;
+  }
+
+  /**
+   * Extract and store key facts from an interaction
+   * Uses LLM-based extraction with keyword fallback
+   * Handles memory conflicts (e.g., name corrections, updates)
+   * @param interaction - Interaction to extract facts from
+   */
+  private async extractAndStoreKeyFacts(interaction: Interaction): Promise<void> {
+    const startTime = Date.now();
+
+    // Extract facts using LLM (with keyword fallback)
+    const facts = await this.extractKeyFacts(interaction);
+
+    let stored = 0;
+    let replaced = 0;
+
+    // Store each extracted fact with conflict resolution
     for (const fact of facts) {
-      await this.addMemory(fact);
+      // Check for conflicting memories
+      const conflictingMemory = await this.findConflictingMemory(interaction.userId, fact);
+
+      if (conflictingMemory) {
+        console.log(`[MemoryManager] Found conflicting memory: ${conflictingMemory.id}`);
+        console.log(`  Old: ${conflictingMemory.content}`);
+        console.log(`  New: ${fact.content}`);
+
+        // Delete old conflicting memory
+        await vectorStore.deleteMemory(conflictingMemory.id);
+
+        // Store new memory with version tracking
+        await this.addMemory({
+          userId: interaction.userId,
+          content: fact.content,
+          type: fact.type,
+          category: fact.category,
+          sessionId: interaction.sessionId,
+          timestamp: interaction.timestamp,
+          importance: fact.importance,
+          metadata: {
+            extractedFrom: 'llm',
+            originalMessage: interaction.userMessage.substring(0, 100),
+            confidence: fact.confidence,
+            replacedMemoryId: conflictingMemory.id,
+            replacedAt: Date.now()
+          }
+        });
+
+        replaced++;
+      } else {
+        // No conflict, store normally
+        await this.addMemory({
+          userId: interaction.userId,
+          content: fact.content,
+          type: fact.type,
+          category: fact.category,
+          sessionId: interaction.sessionId,
+          timestamp: interaction.timestamp,
+          importance: fact.importance,
+          metadata: {
+            extractedFrom: 'llm',
+            originalMessage: interaction.userMessage.substring(0, 100),
+            confidence: fact.confidence
+          }
+        });
+
+        stored++;
+      }
     }
+
+    console.log(`[MemoryManager] Stored ${stored} new facts, replaced ${replaced} conflicting facts (${Date.now() - startTime}ms)`);
+  }
+
+  /**
+   * Find conflicting memory for a new fact
+   * Detects semantic conflicts like name corrections, preference changes, etc.
+   * @param userId - User ID
+   * @param newFact - New fact to check for conflicts
+   * @returns Conflicting memory or null
+   */
+  private async findConflictingMemory(
+    userId: string,
+    newFact: {
+      content: string;
+      type: MemoryType;
+      category: MemoryCategory;
+    }
+  ): Promise<Memory | null> {
+    // Only check for conflicts on certain types
+    const conflictableTypes: MemoryType[] = ['preference', 'extracted_fact'];
+    if (!conflictableTypes.includes(newFact.type)) {
+      return null;
+    }
+
+    // Detect what kind of fact this is
+    const factType = this.detectFactType(newFact.content);
+
+    // If we can't determine the fact type, no conflict resolution
+    if (!factType) {
+      return null;
+    }
+
+    // Search for existing facts of the same type
+    const existingMemories = await vectorStore.getUserMemories(userId);
+
+    for (const memory of existingMemories) {
+      // Skip conversation memories
+      if (memory.type === 'conversation') {
+        continue;
+      }
+
+      const existingFactType = this.detectFactType(memory.content);
+
+      // If both are the same type of fact, they conflict
+      if (existingFactType === factType) {
+        // Additional check: make sure they're actually different
+        if (memory.content.toLowerCase() !== newFact.content.toLowerCase()) {
+          return memory;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Detect what type of fact a memory contains
+   * @param content - Memory content
+   * @returns Fact type or null
+   */
+  private detectFactType(content: string): string | null {
+    const lower = content.toLowerCase();
+
+    // Name patterns
+    if (lower.includes("user's name is") || lower.includes("user is called") ||
+        lower.includes("prefers to be called") || lower.match(/\bname\b.*\bis\b/)) {
+      return 'name';
+    }
+
+    // Email patterns
+    if (lower.includes("user's email") || lower.includes("email is") || lower.match(/email.*@/)) {
+      return 'email';
+    }
+
+    // Phone patterns
+    if (lower.includes("user's phone") || lower.includes("phone is") || lower.includes("call") && lower.match(/\d{3}[-.\s]?\d{3,4}/)) {
+      return 'phone';
+    }
+
+    // Company/job patterns
+    if (lower.includes("works at") || lower.includes("employed by") || lower.includes("company is")) {
+      return 'company';
+    }
+
+    // Location patterns
+    if (lower.includes("lives in") || lower.includes("from") || lower.includes("located in")) {
+      return 'location';
+    }
+
+    return null;
   }
 
   /**
@@ -481,7 +808,7 @@ export class MemoryManager {
     try {
       return await vectorStore.searchByEmbedding(
         memory.embedding,
-        { userId: memory.userId, type: memory.type },
+        { userId: memory.userId },
         5
       );
     } catch (error) {

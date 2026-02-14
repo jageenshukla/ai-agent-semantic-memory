@@ -296,6 +296,45 @@ export class VectorStore {
   }
 
   /**
+   * Get all memories for a specific user
+   * @param userId - User ID to get memories for
+   * @returns Array of memories for that user
+   */
+  async getUserMemories(userId: string): Promise<Memory[]> {
+    this.ensureInitialized();
+
+    try {
+      const results = await this.collection!.get({
+        where: { userId },
+        include: ['documents', 'metadatas']
+      });
+
+      const memories: Memory[] = [];
+
+      for (let i = 0; i < results.ids.length; i++) {
+        const metadata = results.metadatas?.[i] as any;
+
+        memories.push({
+          id: results.ids[i],
+          userId: metadata?.userId || '',
+          content: results.documents?.[i] || '',
+          type: metadata?.type || 'conversation',
+          category: metadata?.category || 'general',
+          timestamp: metadata?.timestamp || Date.now(),
+          sessionId: metadata?.sessionId,
+          importance: metadata?.importance || 0.5,
+          metadata
+        });
+      }
+
+      return memories;
+    } catch (error) {
+      console.error('[VectorStore] Get user memories error:', error);
+      return [];
+    }
+  }
+
+  /**
    * Get count of memories (optionally filtered by user)
    * @param userId - Optional user ID to filter by
    * @returns Count of memories
